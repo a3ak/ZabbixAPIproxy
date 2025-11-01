@@ -30,3 +30,12 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Exclude log files and configuration files
+*.log
+*.yaml
+:memory:
+
+# Exclude directories for build artifacts
+/bin
+/db
