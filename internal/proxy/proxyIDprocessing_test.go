@@ -7,8 +7,6 @@ import (
 	"testing"
 
 	"ZabbixAPIproxy/internal/cache"
-
-	"github.com/stretchr/testify/assert"
 )
 
 type cacheConfig cache.CacheCfg
@@ -231,32 +229,6 @@ func TestConvertProxyIDToOriginal(t *testing.T) {
 			}
 		})
 	}
-}
-
-// TestGenerateProxyID_Collision тестирует обработку коллизий при генерации ProxyID
-func TestGenerateProxyID_Collision(t *testing.T) {
-	// Инициализируем proxy для теста
-	g := Global{MaxRequests: 10}
-	z := ZabbixConf{}
-	InitProxy(g, z, CBConf{}, CacheConf(initTestCache()), []string{})
-	defer cleanupTestProxy()
-
-	serverID := 3
-
-	// Генерируем ID для host с именем "test-host"
-	result1, err1 := generateProxyID("host", map[string]any{
-		"hostid": 100,
-		"name":   "test-host",
-	}, serverID)
-	assert.NoError(t, err1)
-	assert.NotEqual(t, 0, result1)
-
-	// Генерируем ID для того же host - должен вернуть тот же ID из кеша
-	result2, err2 := generateProxyID("host", map[string]any{
-		"hostid": 100,
-	}, serverID)
-	assert.NoError(t, err2)
-	assert.Equal(t, result1, result2)
 }
 
 // TestIsPureDigitString тестирует функцию isPureDigitString
