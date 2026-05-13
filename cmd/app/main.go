@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"sync"
 	"syscall"
 	"time"
 
@@ -29,10 +30,12 @@ type config struct {
 }
 
 var (
-	conf       config
-	confPath   string
-	httpServer *http.Server
-	version    = "dev"
+	conf           config
+	confPath       string
+	httpServer     *http.Server
+	version        = "dev"
+	confMutex      sync.RWMutex
+	stopMonitoring context.CancelFunc // для сохранения cancel функции
 )
 
 func init() {
@@ -49,7 +52,7 @@ func init() {
 func startMetricsServer(mux *http.ServeMux, freq time.Duration) (stopMetricsServer func()) {
 	// Инициализируем экспортер метрик
 	exporter := metrics.NewExporter()
-	exporter.Start(freq * time.Second) // Обновляем метрики каждые 30 секунд
+	exporter.Start(freq) // Частота обновления метрик
 
 	// Инициализируем метрики в proxy package
 	proxy.InitMetrics(exporter)
@@ -86,13 +89,13 @@ func main() {
 
 	// Запускаем сбор Prometheus метрик
 	if conf.Global.MetricPath != "" {
-		stop_exporter := startMetricsServer(mux, 30)
+		stop_exporter := startMetricsServer(mux, 30*time.Second)
 		defer stop_exporter()
 	}
 
 	//Запуск мониторинга в логе
 	if conf.Global.MonitoringInLog {
-		startMonitoring()
+		stopMonitoring = startMonitoring()
 	}
 
 	//Инициализируем proxy.Zbx до вывода в лог
@@ -106,7 +109,9 @@ func main() {
 
 	// Основной эндпоинт API
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		confMutex.RLock()
 		proxy.AuthMiddleware(proxy.Handler, conf.Global.MetricPath, conf.Global.Login, conf.Global.Password, conf.Global.Token)(w, r)
+		confMutex.RUnlock()
 	})
 
 	// Настройка сервера HTTP сервера
@@ -172,9 +177,20 @@ func reloadConfiguration() {
 	newConf := config{}
 	if err := loadConf(&newConf, confPath); err != nil {
 		logger.Global.Errorf("Failed to reload configuration: %v", err)
+		return
 	}
-	// Останавливаем кеш
-	proxy.StopCacheDB()
+
+	// Добавляем мьютекс для защиты от race condition
+	confMutex.Lock()
+	defer confMutex.Unlock()
+
+	// Останавливаем старые компоненты
+	if stopMonitoring != nil {
+		stopMonitoring()
+	}
+
+	// Останавливаем proxy
+	proxy.StopProxy()
 
 	// Обновляем конфигурацию
 	conf = newConf
@@ -183,6 +199,11 @@ func reloadConfiguration() {
 
 	// Переинициализируем логер
 	logger.InitLogger(conf.Logging)
+
+	// Перезапускаем мониторинг
+	if conf.Global.MonitoringInLog {
+		stopMonitoring = startMonitoring()
+	}
 
 	//Устанавливаем таймауты httpServer
 	httpServer.ReadTimeout = time.Duration(suffix.UnsafeToSeconds(conf.Global.ReadTimeout)) * time.Second
@@ -294,6 +315,13 @@ func loadConf(cfg *config, cfgPath string) error {
 	decoder := yaml.NewDecoder(file)
 	if err := decoder.Decode(cfg); err != nil {
 		return err
+	}
+
+	// Валидация server.id
+	for i, server := range cfg.Zabbix.Servers {
+		if server.ID < 1 || server.ID > 9 {
+			return fmt.Errorf("server[%d] id must be between 1 and 9, got %d", i, server.ID)
+		}
 	}
 
 	setDefaultsConfParams(cfg)

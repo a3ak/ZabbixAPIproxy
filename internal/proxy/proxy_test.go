@@ -155,7 +155,7 @@ func (tp *TestProxy) Cleanup() {
 		tp.initialized = false
 	}
 
-	defer os.Remove(":memory:") // Cleanup in-memory DB file
+	os.Remove(":memory:") // Cleanup in-memory DB file
 }
 
 func (tp *TestProxy) GetMockClient() *MockZabbixClient {
@@ -218,7 +218,29 @@ func TestInitProxy(t *testing.T) {
 	assert.NotNil(t, prx.zbxClient)
 
 	// Cleanup
-	StopProxy()
+	cleanupTestProxy()
+}
+
+// TestInitProxy_DefaultMaxRequests тестирует дефолтное значение MaxRequests
+func TestInitProxy_DefaultMaxRequests(t *testing.T) {
+	g := Global{
+		MaxRequests: 0, // 🆕 Тестируем zero value
+	}
+
+	z := ZabbixConf{
+		Servers: []zabbix.ZabbixServer{},
+	}
+
+	InitProxy(g, z, CBConf{}, CacheConf{
+		TTL:             "1h",
+		CleanupInterval: "5m",
+		DBPath:          ":memory:",
+		AutoSave:        "30s",
+	}, []string{})
+	defer cleanupTestProxy()
+
+	// Проверяем, что MaxRequests стал 100 (дефолт)
+	assert.Equal(t, 100, cap(prx.requestSemaphore))
 }
 
 // TestGetAllServers тестирует получение всех серверов
@@ -232,7 +254,7 @@ func TestGetAllServers(t *testing.T) {
 	}
 
 	InitProxy(g, z, CBConf{}, CacheConf(initTestCache()), []string{})
-	defer StopProxy()
+	defer cleanupTestProxy()
 
 	servers := getAllServers()
 	assert.ElementsMatch(t, []int{1, 2, 3}, servers)
@@ -284,7 +306,7 @@ func TestGetTargetServers(t *testing.T) {
 			}
 
 			InitProxy(g, z, CBConf{}, CacheConf(initTestCache()), []string{})
-			defer StopProxy()
+			defer cleanupTestProxy()
 
 			servers := getTargetServers(tc.request)
 			assert.ElementsMatch(t, tc.expected, servers)
@@ -536,7 +558,7 @@ func TestGetConnectionStats(t *testing.T) {
 	}
 
 	InitProxy(g, z, CBConf{}, CacheConf(initTestCache()), []string{})
-	defer StopProxy()
+	defer cleanupTestProxy()
 
 	stats := GetConnectionStats()
 
@@ -638,6 +660,9 @@ func TestStopProxy(t *testing.T) {
 	// Verify semaphore is closed (нужно аккуратно проверять, так как close делает канал непригодным для использования)
 	// Вместо этого проверим, что основные структуры очищены
 	assert.NotNil(t, prx.cache) // Кеш все еще существует, но остановлен
+
+	// Cleanup
+	os.Remove(":memory:")
 }
 
 // Вспомогательные функции для тестов

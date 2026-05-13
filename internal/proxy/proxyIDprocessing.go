@@ -108,8 +108,17 @@ func generateProxyID(fieldType string, data map[string]any, serverID int) (any, 
 					h := fnv.New32a()
 					h.Write([]byte(v))
 
-					//Забираем 6 последник цифр и умножаем на 0, что бы получить PorxyID с 0 в конце для более простой идентификации ProxyID
+					//Забираем 7 последник цифр и умножаем на 10, что бы получить PorxyID с 0 в конце для более простой идентификации ProxyID
 					proxyID = int(h.Sum32()) % 10000000 * 10
+
+					// Проверка коллизий
+					if existingOrigID, exists := prx.cache.CacheType[fieldType].GetOriginalID(proxyID, serverID); exists && existingOrigID != intOrigID {
+						// Коллизия! Генерируем уникальный ID с добавлением serverID
+						h.Reset()
+						fmt.Fprintf(h, "%s", "collision")
+						proxyID = int(h.Sum32()) % 100000000 * 10
+						logger.Global.Warningf("Hash collision detected for '%s' (server %d). Generated unique ID: %d", v, serverID, proxyID)
+					}
 
 					//Пооизводим запись в кеш
 					prx.cache.CacheType[fieldType].Set(proxyID, intOrigID, serverID, v)

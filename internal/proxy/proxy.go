@@ -75,8 +75,16 @@ type proxy struct {
 
 // Инициализация первичных параметров proxy
 func NewProxy(g Global, z ZabbixConf, excludeLog []string) proxy {
+
+	// Защита от zero value MaxRequests
+	maxRequests := g.MaxRequests
+	if maxRequests <= 0 {
+		maxRequests = 100
+		logger.Global.Warningf("max_requests is 0 or negative, using default: 100")
+	}
+
 	return proxy{cachedFields: map[string]string{"host": "name", "group": "name"},
-		requestSemaphore: make(chan struct{}, g.MaxRequests),
+		requestSemaphore: make(chan struct{}, maxRequests),
 		global:           g,
 		config:           z,
 		excludeRequests:  excludeLog,
