@@ -1,7 +1,9 @@
 package cache
 
 import (
+	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -716,5 +718,266 @@ func TestCacheType_DeleteMultiple(t *testing.T) {
 	// Verify remaining data
 	if _, found := cache.GetOriginalID(200, 1); !found {
 		t.Error("ProxyID 200 should still exist")
+	}
+}
+
+// TestGetEntityName тестирует функцию GetEntityName
+func TestGetEntityName(t *testing.T) {
+	cache := newCache()
+
+	// Добавляем тестовые данные
+	cache.Set(100, 500, 1, "TestHost")
+	cache.Set(200, 600, 1, "AnotherHost")
+
+	tests := []struct {
+		name         string
+		proxyID      int
+		expectedName string
+		shouldFind   bool
+	}{
+		{
+			"existing proxyID",
+			100,
+			"TestHost",
+			true,
+		},
+		{
+			"another existing proxyID",
+			200,
+			"AnotherHost",
+			true,
+		},
+		{
+			"non-existing proxyID",
+			999,
+			"",
+			false,
+		},
+		{
+			"zero proxyID",
+			0,
+			"",
+			false,
+		},
+		{
+			"negative proxyID",
+			-1,
+			"",
+			false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			name, found := cache.GetEntityName(tt.proxyID)
+
+			if found != tt.shouldFind {
+				t.Errorf("GetEntityName(%d) found = %v, expected %v", tt.proxyID, found, tt.shouldFind)
+			}
+
+			if name != tt.expectedName {
+				t.Errorf("GetEntityName(%d) name = '%s', expected '%s'", tt.proxyID, name, tt.expectedName)
+			}
+		})
+	}
+}
+
+// TestGetEntityNameWithMultipleServers тестирует GetEntityName с несколькими серверами
+func TestGetEntityNameWithMultipleServers(t *testing.T) {
+	cache := newCache()
+
+	// Один proxyID для разных серверов
+	cache.Set(100, 500, 1, "MultiServerHost")
+	cache.Set(100, 600, 2, "MultiServerHost")
+	cache.Set(100, 700, 3, "MultiServerHost")
+
+	// GetEntityName не зависит от serverID
+	name, found := cache.GetEntityName(100)
+	if !found {
+		t.Error("GetEntityName should find existing proxyID")
+	}
+	if name != "MultiServerHost" {
+		t.Errorf("GetEntityName returned '%s', expected 'MultiServerHost'", name)
+	}
+}
+
+// TestGetEntityNameAfterUpdate тестирует GetEntityName после обновления кеша
+func TestGetEntityNameAfterUpdate(t *testing.T) {
+	cache := newCache()
+
+	// Первоначальная запись
+	cache.Set(100, 500, 1, "OriginalName")
+
+	// Проверяем имя
+	if name, _ := cache.GetEntityName(100); name != "OriginalName" {
+		t.Errorf("Expected 'OriginalName', got '%s'", name)
+	}
+
+	// Обновляем запись с новым именем
+	cache.Set(100, 600, 2, "UpdatedName")
+
+	// GetEntityName должен вернуть последнее имя
+	name, found := cache.GetEntityName(100)
+	if !found {
+		t.Error("GetEntityName should find existing proxyID after update")
+	}
+	if name != "UpdatedName" {
+		t.Errorf("Expected 'UpdatedName', got '%s'", name)
+	}
+}
+
+// TestGetEntityNameAfterDelete тестирует GetEntityName после удаления записи
+func TestGetEntityNameAfterDelete(t *testing.T) {
+	cache := newCache()
+
+	// Добавляем данные
+	cache.Set(100, 500, 1, "TestHost")
+	cache.Set(200, 600, 1, "AnotherHost")
+
+	// Удаляем одну запись
+	cache.Delete([]int{100})
+
+	// Проверяем, что удаленная запись не находится
+	if _, found := cache.GetEntityName(100); found {
+		t.Error("GetEntityName should not find deleted proxyID")
+	}
+
+	// Проверяем, что оставшаяся запись всё ещё доступна
+	if name, found := cache.GetEntityName(200); !found || name != "AnotherHost" {
+		t.Errorf("Expected to find 'AnotherHost', got '%s', found=%v", name, found)
+	}
+}
+
+// TestGetEntityNameAfterCleanup тестирует GetEntityName после очистки кеша
+func TestGetEntityNameAfterCleanup(t *testing.T) {
+	cache := newCache()
+
+	// Добавляем устаревшую запись
+	cache.mu.Lock()
+	cache.ProxyID[100] = cacheItem{
+		Name:       "OldHost",
+		OriginalID: map[int]int{1: 500},
+		CreatedAt:  time.Now().Add(-2 * time.Hour),
+	}
+	cache.ReverseID[500] = reverseID{ProxyID: map[int]int{1: 100}}
+	cache.mu.Unlock()
+
+	// Добавляем свежую запись
+	cache.Set(200, 600, 1, "RecentHost")
+
+	// Очищаем кеш с TTL в 1 час
+	cache.cleanup(time.Hour)
+
+	// Проверяем, что устаревшая запись удалена
+	if _, found := cache.GetEntityName(100); found {
+		t.Error("GetEntityName should not find cleaned up proxyID")
+	}
+
+	// Проверяем, что свежая запись осталась
+	if name, found := cache.GetEntityName(200); !found || name != "RecentHost" {
+		t.Errorf("Expected to find 'RecentHost', got '%s', found=%v", name, found)
+	}
+}
+
+// TestGetEntityNameConcurrentAccess тестирует конкурентный доступ к GetEntityName
+func TestGetEntityNameConcurrentAccess(t *testing.T) {
+	cache := newCache()
+	iterations := 100
+
+	// Добавляем тестовые данные
+	for i := 1; i <= 10; i++ {
+		cache.Set(i*100, i*500, 1, fmt.Sprintf("Host%d", i))
+	}
+
+	// Конкурентные вызовы GetEntityName
+	var wg sync.WaitGroup
+	wg.Add(3)
+
+	for i := 0; i < 3; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 1; j <= iterations; j++ {
+				proxyID := (j%10 + 1) * 100
+				name, found := cache.GetEntityName(proxyID)
+				if found && name == "" {
+					t.Errorf("Found proxyID %d but name is empty", proxyID)
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+	// Не должно быть паники или data race
+}
+
+// TestGetEntityNameIntegration тестирует интеграцию с Set и удалением
+func TestGetEntityNameIntegration(t *testing.T) {
+	cache := newCache()
+
+	// Сценарий: добавляем, читаем, обновляем, читаем, удаляем, читаем
+	testName := "IntegrationTestHost"
+
+	// 1. Добавляем
+	cache.Set(100, 500, 1, testName)
+
+	if name, found := cache.GetEntityName(100); !found || name != testName {
+		t.Fatalf("Step 1: Expected '%s', got '%s', found=%v", testName, name, found)
+	}
+
+	// 2. Проверяем что данные доступны по обоим направлениям
+	if originalID, found := cache.GetOriginalID(100, 1); !found || originalID != 500 {
+		t.Fatalf("Step 2: Expected originalID 500, got %d, found=%v", originalID, found)
+	}
+
+	if proxyID, found := cache.GetProxyID(500, 1); !found || proxyID != 100 {
+		t.Fatalf("Step 2: Expected proxyID 100, got %d, found=%v", proxyID, found)
+	}
+
+	// 3. Удаляем
+	cache.Delete([]int{100})
+
+	// 4. Проверяем что всё удалено
+	if _, found := cache.GetEntityName(100); found {
+		t.Error("Step 4: GetEntityName should not find deleted proxyID")
+	}
+
+	if _, found := cache.GetOriginalID(100, 1); found {
+		t.Error("Step 4: GetOriginalID should not find deleted proxyID")
+	}
+
+	if _, found := cache.GetProxyID(500, 1); found {
+		t.Error("Step 4: GetProxyID should not find deleted originalID")
+	}
+}
+
+// TestGetEntityNameWithSpecialCharacters тестирует специальные символы в имени
+func TestGetEntityNameWithSpecialCharacters(t *testing.T) {
+	cache := newCache()
+
+	specialNames := []string{
+		"host with spaces",
+		"host-with-dashes",
+		"host_with_underscores",
+		"host.with.dots",
+		"host@with#special$chars",
+		"хост-на-русском",
+		"ホスト日本語",
+		"主机中文",
+		"",
+		"a", // минимальная длина
+	}
+
+	for i, name := range specialNames {
+		proxyID := (i + 1) * 100
+		cache.Set(proxyID, (i+1)*500, 1, name)
+
+		retrievedName, found := cache.GetEntityName(proxyID)
+		if !found {
+			t.Errorf("Failed to find proxyID %d for name '%s'", proxyID, name)
+			continue
+		}
+		if retrievedName != name {
+			t.Errorf("For proxyID %d: expected name '%s', got '%s'", proxyID, name, retrievedName)
+		}
 	}
 }

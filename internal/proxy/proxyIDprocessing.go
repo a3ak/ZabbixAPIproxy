@@ -109,15 +109,29 @@ func generateProxyID(fieldType string, data map[string]any, serverID int) (any, 
 					h.Write([]byte(v))
 
 					//Забираем 7 последник цифр и умножаем на 10, что бы получить PorxyID с 0 в конце для более простой идентификации ProxyID
-					proxyID = int(h.Sum32()) % 10000000 * 10
+					digits := 10000000 // 10 в 7 степени
+					proxyID = int(h.Sum32()) % digits * 10
 
 					// Проверка коллизий
-					if existingOrigID, exists := prx.cache.CacheType[fieldType].GetOriginalID(proxyID, serverID); exists && existingOrigID != intOrigID {
+					// 5 попыток победить коллизию
+					for i := range 6 {
+						if i == 5 {
+							logger.Global.Errorf("Unresolvable collision to generate proxy ID for type %s and EntityName '%s' for ZBXServer: %d", fieldType, v, serverID)
+							return 0, fmt.Errorf("unresolvable collision to generate proxy ID for type %s and EntityName '%s'", fieldType, v)
+						}
+						if n, exists := prx.cache.CacheType[fieldType].GetEntityName(proxyID); exists && n == v {
+							//Коллизии нет, выходим из цикла
+							break
+						} else if !exists {
+							//Новая запись, выходим из цикла
+							break
+						}
+
 						// Коллизия! Генерируем уникальный ID с добавлением serverID
 						h.Reset()
-						fmt.Fprintf(h, "%s", "collision")
-						proxyID = int(h.Sum32()) % 100000000 * 10
-						logger.Global.Warningf("Hash collision detected for '%s' (server %d). Generated unique ID: %d", v, serverID, proxyID)
+						h.Write([]byte("col" + strconv.Itoa(i) + v))
+						digits /= 10
+						proxyID = int(h.Sum32()) % digits * 10
 					}
 
 					//Пооизводим запись в кеш

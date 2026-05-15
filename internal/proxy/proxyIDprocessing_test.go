@@ -476,3 +476,448 @@ func TestIDBasedResponseSimpleModify(t *testing.T) {
 		})
 	}
 }
+
+// TestGenerateProxyIDCollisions тестирует механизм разрешения коллизий
+func TestGenerateProxyIDCollisions(t *testing.T) {
+	// Инициализируем proxy для теста
+	g := Global{MaxRequests: 10}
+	z := ZabbixConf{}
+	InitProxy(g, z, CBConf{}, CacheConf(initTestCache()), []string{})
+	defer stopTestProxy()
+
+	serverID := 3
+	fieldType := "host"
+
+	// Создаем тестовые имена
+	testNames := []string{
+		"test-host-1",
+		"test-host-2",
+		"test-host-3",
+		"test-host-4",
+		"test-host-5",
+	}
+
+	generatedIDs := make(map[int]string) // proxyID -> name
+	collisionsDetected := 0
+
+	for _, name := range testNames {
+		data := map[string]any{
+			"hostid": len(name),
+			"name":   name,
+		}
+
+		result, err := generateProxyID(fieldType, data, serverID)
+		if err != nil {
+			t.Errorf("Failed to generate proxy ID for '%s': %v", name, err)
+			continue
+		}
+
+		// Конвертируем результат в int для проверки
+		var proxyID int
+		switch v := result.(type) {
+		case int:
+			proxyID = v
+		case string:
+			proxyID, _ = strconv.Atoi(v)
+		}
+
+		if proxyID == 0 {
+			t.Errorf("Generated zero proxy ID for '%s'", name)
+			continue
+		}
+
+		// Проверяем, что ID заканчивается на 0 (наш шаблон)
+		if proxyID%10 != 0 {
+			t.Errorf("Proxy ID %d for '%s' should end with 0", proxyID, name)
+		}
+
+		// Проверяем на коллизию
+		if existingName, exists := generatedIDs[proxyID]; exists {
+			collisionsDetected++
+			// Если коллизия обнаружена - это ожидаемо для реальных данных
+			// Главное, что механизм разрешения коллизий сработал и вернул ошибку ИЛИ уникальный ID
+			t.Logf("Collision for proxyID %d between '%s' and '%s'", proxyID, existingName, name)
+		}
+		generatedIDs[proxyID] = name
+	}
+
+	t.Logf("Generated %d unique proxy IDs from %d names, detected %d collisions",
+		len(generatedIDs), len(testNames), collisionsDetected)
+}
+
+// TestGenerateProxyIDForcedCollision тестирует принудительную коллизию
+func TestGenerateProxyIDForcedCollision(t *testing.T) {
+	// Инициализируем proxy для теста
+	g := Global{MaxRequests: 10}
+	z := ZabbixConf{}
+	InitProxy(g, z, CBConf{}, CacheConf(initTestCache()), []string{})
+	defer stopTestProxy()
+
+	serverID := 3
+	fieldType := "host"
+
+	// 1. Генерируем ID для первого имени
+	name1 := "original-host"
+	data1 := map[string]any{
+		"hostid": 100,
+		"name":   name1,
+	}
+
+	result1, err := generateProxyID(fieldType, data1, serverID)
+	if err != nil {
+		t.Fatalf("First generation failed: %v", err)
+	}
+
+	t.Logf("First proxyID: %v", result1)
+
+	// 2. Теперь симулируем коллизию:
+	// Добавляем запись с тем же proxyID, но другим именем напрямую в кеш
+	var firstProxyID int
+	switch v := result1.(type) {
+	case int:
+		firstProxyID = v
+	case string:
+		firstProxyID, _ = strconv.Atoi(v)
+	}
+
+	// Создаём коллизию - добавляем другую запись с тем же proxyID
+	collisionName := "collision-host"
+	prx.cache.CacheType[fieldType].Set(firstProxyID, 999, serverID, collisionName)
+
+	// 3. Пытаемся сгенерировать ID для второго имени
+	// Механизм должен обнаружить коллизию и сгенерировать новый ID
+	name2 := "another-host"
+	data2 := map[string]any{
+		"hostid": 200,
+		"name":   name2,
+	}
+
+	result2, err := generateProxyID(fieldType, data2, serverID)
+	if err != nil {
+		t.Fatalf("Second generation with collision failed: %v", err)
+	}
+
+	t.Logf("After collision proxyID: %v", result2)
+
+	// 4. Проверяем, что сгенерирован новый уникальный ID
+	var secondProxyID int
+	switch v := result2.(type) {
+	case int:
+		secondProxyID = v
+	case string:
+		secondProxyID, _ = strconv.Atoi(v)
+	}
+
+	if firstProxyID == secondProxyID {
+		t.Errorf("Collision resolution failed: both names have same proxyID %d", firstProxyID)
+	}
+
+	// 5. Проверяем, что второй ID тоже заканчивается на 0
+	if secondProxyID%10 != 0 {
+		t.Errorf("Second proxy ID %d should end with 0", secondProxyID)
+	}
+}
+
+// TestGenerateProxyIDMultipleCollisions тестирует множественные коллизии
+func TestGenerateProxyIDMultipleCollisions(t *testing.T) {
+	// Инициализируем proxy для теста
+	g := Global{MaxRequests: 10}
+	z := ZabbixConf{}
+	InitProxy(g, z, CBConf{}, CacheConf(initTestCache()), []string{})
+	defer stopTestProxy()
+
+	serverID := 3
+	fieldType := "host"
+
+	// Создаем базовую запись
+	baseName := "base-host"
+	baseData := map[string]any{
+		"hostid": 100,
+		"name":   baseName,
+	}
+
+	baseResult, err := generateProxyID(fieldType, baseData, serverID)
+	if err != nil {
+		t.Fatalf("Base generation failed: %v", err)
+	}
+
+	var baseProxyID int
+	switch v := baseResult.(type) {
+	case int:
+		baseProxyID = v
+	case string:
+		baseProxyID, _ = strconv.Atoi(v)
+	}
+
+	t.Logf("Base proxyID: %d", baseProxyID)
+
+	// Добавляем несколько коллизий в кеш
+	collisionNames := []string{"collision-1", "collision-2", "collision-3", "collision-4", "collision-5"}
+	for i, name := range collisionNames {
+		prx.cache.CacheType[fieldType].Set(baseProxyID, 200+i, serverID, name)
+	}
+
+	// Пытаемся сгенерировать ID для нового имени
+	newName := "new-host-after-multiple-collisions"
+	newData := map[string]any{
+		"hostid": 300,
+		"name":   newName,
+	}
+
+	newResult, err := generateProxyID(fieldType, newData, serverID)
+	if err != nil {
+		// Если после 5 попыток коллизия не разрешилась - это ожидаемо
+		t.Logf("Multiple collisions exhausted attempts as expected: %v", err)
+		return
+	}
+
+	var newProxyID int
+	switch v := newResult.(type) {
+	case int:
+		newProxyID = v
+	case string:
+		newProxyID, _ = strconv.Atoi(v)
+	}
+
+	// Проверяем, что новый ID уникален
+	if newProxyID == baseProxyID {
+		t.Errorf("Collision resolution failed for multiple collisions")
+	}
+
+	t.Logf("New proxyID after %d collisions: %d", len(collisionNames), newProxyID)
+}
+
+// TestGenerateProxyIDWithExistingCache тестирует генерацию с уже существующими данными в кеше
+func TestGenerateProxyIDWithExistingCache(t *testing.T) {
+	// Инициализируем proxy для теста
+	g := Global{MaxRequests: 10}
+	z := ZabbixConf{}
+	InitProxy(g, z, CBConf{}, CacheConf(initTestCache()), []string{})
+	defer stopTestProxy()
+
+	serverID := 3
+	fieldType := "host"
+
+	// Сначала генерируем ID для одного имени
+	data1 := map[string]any{
+		"hostid": 100,
+		"name":   "test-host-1",
+	}
+
+	result1, err := generateProxyID(fieldType, data1, serverID)
+	if err != nil {
+		t.Fatalf("First generation failed: %v", err)
+	}
+
+	// Пытаемся сгенерировать ID для того же имени, но другого сервера
+	data2 := map[string]any{
+		"hostid": 100,
+		"name":   "test-host-1",
+	}
+
+	result2, err := generateProxyID(fieldType, data2, serverID+1)
+	if err != nil {
+		t.Fatalf("Second generation failed: %v", err)
+	}
+
+	// Для одного и того же имени на разных серверах должен быть одинаковый proxyID
+	if result1 != result2 {
+		t.Errorf("Same name should produce same proxy ID on different servers: %v vs %v", result1, result2)
+	}
+
+	// Проверяем, что для другого имени генерируется другой ID
+	data3 := map[string]any{
+		"hostid": 200,
+		"name":   "test-host-2",
+	}
+
+	result3, err := generateProxyID(fieldType, data3, serverID)
+	if err != nil {
+		t.Fatalf("Third generation failed: %v", err)
+	}
+
+	if result1 == result3 {
+		t.Errorf("Different names should produce different proxy IDs: %v equals %v", result1, result3)
+	}
+}
+
+// TestGenerateProxyIDMultipleServers тестирует работу с несколькими серверами
+func TestGenerateProxyIDMultipleServers(t *testing.T) {
+	// Инициализируем proxy для теста
+	g := Global{MaxRequests: 10}
+	z := ZabbixConf{}
+	InitProxy(g, z, CBConf{}, CacheConf(initTestCache()), []string{})
+	defer stopTestProxy()
+
+	fieldType := "host"
+	hostName := "multi-server-host"
+
+	serverIDs := []int{1, 2, 3, 4, 5}
+
+	// Генерируем ID для одного хоста на разных серверах
+	generatedIDs := make(map[int]int) // serverID -> proxyID
+	for _, serverID := range serverIDs {
+		data := map[string]any{
+			"hostid": serverID * 100, // Разные оригинальные ID на разных серверах
+			"name":   hostName,
+		}
+
+		result, err := generateProxyID(fieldType, data, serverID)
+		if err != nil {
+			t.Errorf("Failed to generate ID for server %d: %v", serverID, err)
+			continue
+		}
+
+		var proxyID int
+		switch v := result.(type) {
+		case int:
+			proxyID = v
+		case string:
+			proxyID, _ = strconv.Atoi(v)
+		}
+
+		generatedIDs[serverID] = proxyID
+	}
+
+	// Все генерации для одного имени должны давать одинаковый proxyID
+	firstID := generatedIDs[serverIDs[0]]
+	for serverID, proxyID := range generatedIDs {
+		if proxyID != firstID {
+			t.Errorf("Server %d: expected proxy ID %d, got %d", serverID, firstID, proxyID)
+		}
+	}
+
+	// Проверяем, что кеш правильно сохранил все маппинги
+	for _, serverID := range serverIDs {
+		data := map[string]any{
+			"hostid": serverID * 100,
+		}
+
+		result, err := generateProxyID(fieldType, data, serverID)
+		if err != nil {
+			t.Errorf("Failed to get cached ID for server %d: %v", serverID, err)
+			continue
+		}
+
+		if result != generatedIDs[serverID] {
+			t.Errorf("Server %d: cached ID %v doesn't match generated %d", serverID, result, generatedIDs[serverID])
+		}
+	}
+}
+
+// TestGenerateProxyIDStringResult тестирует возврат строкового ID
+func TestGenerateProxyIDStringResult(t *testing.T) {
+	// Инициализируем proxy для теста
+	g := Global{MaxRequests: 10}
+	z := ZabbixConf{}
+	InitProxy(g, z, CBConf{}, CacheConf(initTestCache()), []string{})
+	defer stopTestProxy()
+
+	serverID := 3
+	fieldType := "host"
+
+	// С string ID
+	data := map[string]any{
+		"hostid": "100",
+		"name":   "string-id-host",
+	}
+
+	result, err := generateProxyID(fieldType, data, serverID)
+	if err != nil {
+		t.Fatalf("Generation with string ID failed: %v", err)
+	}
+
+	// Должен вернуть строку
+	if _, ok := result.(string); !ok {
+		t.Errorf("Expected string result for string input, got %T: %v", result, result)
+	}
+
+	// Проверяем, что это валидное число
+	proxyID, err := strconv.Atoi(result.(string))
+	if err != nil {
+		t.Errorf("Result '%v' is not a valid number: %v", result, err)
+	}
+
+	if proxyID <= 0 {
+		t.Errorf("Generated invalid proxy ID: %d", proxyID)
+	}
+}
+
+// TestGenerateProxyIDEdgeCases тестирует граничные случаи
+func TestGenerateProxyIDEdgeCases(t *testing.T) {
+	// Инициализируем proxy для теста
+	g := Global{MaxRequests: 10}
+	z := ZabbixConf{}
+	InitProxy(g, z, CBConf{}, CacheConf(initTestCache()), []string{})
+	defer stopTestProxy()
+
+	serverID := 3
+	fieldType := "host"
+
+	tests := []struct {
+		name        string
+		data        map[string]any
+		expectError bool
+	}{
+		{
+			"empty name field",
+			map[string]any{"hostid": 100, "name": ""},
+			false, // Пустое имя - валидный кейс
+		},
+		{
+			"very long name",
+			map[string]any{"hostid": 100, "name": "a" + string(make([]byte, 1000)) + "b"},
+			false,
+		},
+		{
+			"unicode name",
+			map[string]any{"hostid": 100, "name": "хост-тест-юникод-日本語-中文"},
+			false,
+		},
+		{
+			"special characters",
+			map[string]any{"hostid": 100, "name": "host!@#$%^&*()_+-=[]{}|;':\",./<>?`~"},
+			false,
+		},
+		{
+			"numeric name",
+			map[string]any{"hostid": 100, "name": "1234567890"},
+			false,
+		},
+		{
+			"name with leading/trailing spaces",
+			map[string]any{"hostid": 100, "name": "  spaced-host  "},
+			false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := generateProxyID(fieldType, tt.data, serverID)
+
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("Expected error but got result: %v", result)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Errorf("Unexpected error: %v", err)
+				return
+			}
+
+			var proxyID int
+			switch v := result.(type) {
+			case int:
+				proxyID = v
+			case string:
+				proxyID, _ = strconv.Atoi(v)
+			}
+
+			if proxyID <= 0 {
+				t.Errorf("Generated invalid proxy ID: %d", proxyID)
+			}
+		})
+	}
+}

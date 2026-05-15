@@ -37,7 +37,7 @@ type CacheEntry struct {
 type cacheType struct {
 	mu        sync.RWMutex
 	ProxyID   map[int]cacheItem `json:"proxyID"`  //Возвращает OrignalID
-	ReverseID map[int]reverseID `json:"ServerID"` //Возвращает ProxyID
+	ReverseID map[int]reverseID `json:"ServerID"` //Возвращает ProxyID по OriginalID с учтом ServerID
 }
 
 // ReverseID кеш для получения ProxyID из OriginalID по ServerID
@@ -206,6 +206,21 @@ func (c *cacheType) GetProxyID(OriginalID, ServerID int) (int, bool) {
 
 	proxyID, exists := reverseItem.ProxyID[ServerID]
 	return proxyID, exists
+}
+
+// GetEntityName возвращает имя сущности по которой сгенерировано PorxyID
+// Возвращает (EntityName, true) если найдено, ("", false) если не найдено
+func (c *cacheType) GetEntityName(proxyID int) (string, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	obj, exists := c.ProxyID[proxyID]
+
+	if !exists {
+		return "", false
+	}
+
+	return obj.Name, true
 }
 
 // Delete удаляет элемент из кеша

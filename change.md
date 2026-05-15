@@ -6,141 +6,73 @@
 
 ## Русский
 
-# Исправление критических и средних проблем
-
-## 🔴 Критические исправления
-
-### 1. Защита от `max_requests == 0`
-- **Файл**: `internal/proxy/proxy.go`
-- **Проблема**: При `MaxRequests == 0` создавался небуферизированный канал, что приводило к блокировке всех входящих запросов навсегда
-- **Исправление**: Добавлена проверка значения. Если `MaxRequests <= 0`, устанавливается значение по умолчанию (100)
-
-### 2. Защита reload конфигурации от пустого конфига
-- **Файл**: `cmd/app/main.go`
-- **Проблема**: При ошибке загрузки конфигурации код продолжал выполнение с пустым/частичным конфигом, что могло привести к неработоспособности сервиса
-- **Исправление**: Добавлен `return` при ошибке загрузки конфига
-
-## 🟡 Средние исправления
-
-### 3. Race condition при доступе к глобальному конфигу
-- **Файл**: `cmd/app/main.go`
-- **Проблема**: Конкурентный доступ к глобальной переменной `conf` из нескольких горутин без синхронизации
-- **Исправление**: Добавлен `sync.RWMutex` для защиты чтения/записи конфигурации
-
-### 4. Исправление таймаутов метрик
-- **Файл**: `cmd/app/main.go`
-- **Проблема**: В функцию `startMetricsServer` передавался `int` (30) вместо `time.Duration`, что приводило к некорректному интервалу обновления метрик
-- **Исправление**: Изменён вызов на `30 * time.Second`
-
-### 5. Graceful shutdown мониторинга
-- **Файл**: `cmd/app/main.go`
-- **Проблема**: Cancel функция от `startMonitoring()` не сохранялась, что делало невозможным остановку горутины мониторинга при reload или shutdown
-- **Исправление**: Cancel функция сохраняется в глобальную переменную `stopMonitoring`
-
-### 6. Полная остановка proxy при reload
-- **Файл**: `cmd/app/main.go`
-- **Проблема**: При reload вызывался только `StopCacheDB()`, старые HTTP клиенты Zabbix оставались активными
-- **Исправление**: Вызывается `StopProxy()` который корректно закрывает все соединения
-
-### 7. Валидация server.id
-- **Файл**: `cmd/app/main.go`
-- **Проблема**: Отсутствовала проверка диапазона server.id (должен быть от 1 до 9 согласно документации)
-- **Исправление**: Добавлена валидация с возвратом ошибки при неверном значении
-
-### 8. Обработка FNV коллизий
+### 9. Обработка коллизий FNV-32a при генерации ProxyID
 - **Файл**: `internal/proxy/proxyIDprocessing.go`
-- **Проблема**: При коллизии хешей FNV-32a данные перезаписывались без уведомления, что могло привести к потере маппингов
-- **Исправление**: Добавлена проверка коллизий и перегенерация уникального ID с добавлением serverID
+- **Проблема**: При коллизии хешей FNV-32a (ситуация, когда два разных имени сущности генерируют одинаковый ProxyID) данные перезаписывались без уведомления, что приводило к потере маппингов и некорректной работе системы
+- **Исправление**: 
+  - Добавлена проверка существования ProxyID в кеше перед записью
+  - При обнаружении коллизии выполняется перегенерация уникального ID с добавлением суффикса и уменьшением диапазона
+  - Реализовано до 5 попыток разрешения коллизии, после чего возвращается ошибка
+  - Добавлена функция `GetEntityName` для проверки принадлежности ProxyID конкретному имени
 
-## ✅ Изменения в тестах
-
-- **Новый тест**: `TestInitProxy_DefaultMaxRequests` - проверка дефолтного значения MaxRequests
-- **Новый тест**: `TestGenerateProxyID_Collision` - проверка обработки коллизий
-- **Исправлено**: Очистка ресурсов (in-memory DB) после выполнения тестов
-- **Исправлено**: Тесты адаптированы под новые требования валидации
-
-## 📊 Сводка изменений
-
-| # | Компонент | Файл | Тип |
-|---|-----------|------|-----|
-| 1 | Proxy | `proxy.go` | 🐛 Багфикс |
-| 2 | Main | `main.go` | 🐛 Багфикс |
-| 3 | Main | `main.go` | 🔒 Безопасность |
-| 4 | Main | `main.go` | 🐛 Багфикс |
-| 5 | Main | `main.go` | ♻️ Рефакторинг |
-| 6 | Main | `main.go` | 🐛 Багфикс |
-| 7 | Main | `main.go` | 🛡️ Валидация |
-| 8 | ID processing | `proxyIDprocessing.go` | 🐛 Багфикс |
-| - | Tests | `*_test.go` | ✅ Тесты |
-
+### 10. Тесты механизма разрешения коллизий и GetEntityName
+- **Файлы**: `internal/proxy/proxyIDprocessing_test.go`, `internal/cache/cache_test.go`
+- **Что добавлено**:
+  - **7 новых тестов** для механизма разрешения коллизий:
+    - Проверка уникальности генерируемых ID для разных имен
+    - Принудительное создание коллизии и проверка её разрешения
+    - Множественные коллизии (до 5 попыток)
+    - Повторная генерация для одного имени (возврат существующего ID)
+    - Одно имя на разных серверах (одинаковый ProxyID)
+    - Возврат строкового типа для string ID
+    - Граничные случаи (unicode, спецсимволы, пустые строки)
+  - **8 новых тестов** для функции `GetEntityName`:
+    - Базовые проверки (существующий/несуществующий ID)
+    - Независимость от serverID
+    - Обновление имени
+    - Удаление записи
+    - Очистка по TTL
+    - Конкурентный доступ
+    - Интеграционный тест (полный цикл)
+    - Специальные символы в именах
 
 ---
 
 ## English
 
-# Critical and Medium Issue Fixes
-
-## 🔴 Critical Fixes
-
-### 1. Protection against `max_requests == 0`
-- **File**: `internal/proxy/proxy.go`
-- **Issue**: When `MaxRequests == 0`, an unbuffered channel was created, causing all incoming requests to block indefinitely
-- **Fix**: Added value validation. If `MaxRequests <= 0`, default value (100) is applied
-
-### 2. Reload configuration protection against empty config
-- **File**: `cmd/app/main.go`
-- **Issue**: On configuration load error, the code continued execution with an empty/partial config, potentially breaking the service
-- **Fix**: Added `return` statement on config load error
-
-## 🟡 Medium Fixes
-
-### 3. Race condition on global config access
-- **File**: `cmd/app/main.go`
-- **Issue**: Concurrent access to global `conf` variable from multiple goroutines without synchronization
-- **Fix**: Added `sync.RWMutex` for read/write protection
-
-### 4. Metrics timeout fix
-- **File**: `cmd/app/main.go`
-- **Issue**: Passed `int` (30) instead of `time.Duration` to `startMetricsServer`, causing incorrect metric update interval
-- **Fix**: Changed call to `30 * time.Second`
-
-### 5. Graceful shutdown for monitoring
-- **File**: `cmd/app/main.go`
-- **Issue**: Cancel function from `startMonitoring()` was not saved, making it impossible to stop the monitoring goroutine during reload or shutdown
-- **Fix**: Cancel function is now saved in global variable `stopMonitoring`
-
-### 6. Complete proxy stop on reload
-- **File**: `cmd/app/main.go`
-- **Issue**: On reload, only `StopCacheDB()` was called, leaving old Zabbix HTTP clients active
-- **Fix**: `StopProxy()` is now called, properly closing all connections
-
-### 7. Server ID validation
-- **File**: `cmd/app/main.go`
-- **Issue**: Missing validation for server.id range (should be 1-9 according to documentation)
-- **Fix**: Added validation with error return on invalid value
-
-### 8. FNV collision handling
+### 9. FNV-32a Collision Handling in ProxyID Generation
 - **File**: `internal/proxy/proxyIDprocessing.go`
-- **Issue**: On FNV-32a hash collision, data was overwritten without notification, potentially causing mapping loss
-- **Fix**: Added collision detection and unique ID regeneration with serverID suffix
+- **Issue**: On FNV-32a hash collision (when two different entity names generate the same ProxyID), data was overwritten without notification, causing mapping loss and incorrect system behavior
+- **Fix**: 
+  - Added ProxyID existence check in cache before writing
+  - On collision detection, generates a unique ID with suffix and reduced range
+  - Implemented up to 5 resolution attempts, returns error after exhaustion
+  - Added `GetEntityName` function to verify ProxyID ownership by name
 
-## ✅ Test Changes
+### 10. Tests for Collision Resolution and GetEntityName
+- **Files**: `internal/proxy/proxyIDprocessing_test.go`, `internal/cache/cache_test.go`
+- **What was added**:
+  - **7 new tests** for collision resolution mechanism:
+    - Uniqueness verification for different names
+    - Forced collision creation and resolution check
+    - Multiple collisions (up to 5 attempts)
+    - Same name regeneration (returns existing ID)
+    - Same name on different servers (same ProxyID)
+    - String type return for string IDs
+    - Edge cases (unicode, special characters, empty strings)
+  - **8 new tests** for `GetEntityName` function:
+    - Basic checks (existing/non-existing ID)
+    - ServerID independence
+    - Name update
+    - Record deletion
+    - TTL cleanup
+    - Concurrent access
+    - Integration test (full cycle)
+    - Special characters in names
 
-- **New test**: `TestInitProxy_DefaultMaxRequests` - verifies default MaxRequests value
-- **New test**: `TestGenerateProxyID_Collision` - verifies collision handling
-- **Fixed**: Resource cleanup (in-memory DB) after test execution
-- **Fixed**: Tests adapted to new validation requirements
+## 📊 Изменения / Changes
 
-## 📊 Changes Summary
-
-| # | Component | File | Type |
-|---|-----------|------|------|
-| 1 | Proxy | `proxy.go` | 🐛 Bugfix |
-| 2 | Main | `main.go` | 🐛 Bugfix |
-| 3 | Main | `main.go` | 🔒 Security |
-| 4 | Main | `main.go` | 🐛 Bugfix |
-| 5 | Main | `main.go` | ♻️ Refactoring |
-| 6 | Main | `main.go` | 🐛 Bugfix |
-| 7 | Main | `main.go` | 🛡️ Validation |
-| 8 | ID processing | `proxyIDprocessing.go` | 🐛 Bugfix |
-| - | Tests | `*_test.go` | ✅ Tests |
+| # | Компонент / Component | Файл / File | Тип / Type |
+|---|----------------------|-------------|------------|
+| 9 | ID processing | `proxyIDprocessing.go` | 🐛 Багфикс / Bugfix |
+| 10 | Tests | `*_test.go` | ✅ Тесты / Tests |
